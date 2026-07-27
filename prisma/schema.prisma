@@ -1,0 +1,98 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum Platform {
+  GBA
+  SWITCH
+  N3DS
+}
+
+model User {
+  id           String     @id @default(cuid())
+  fullName     String
+  email        String     @unique
+  cpf          String     @unique @db.Char(11)
+  passwordHash String
+  role         Role       @default(USER)
+  failedLoginAttempts Int @default(0)
+  lockedUntil  DateTime?
+  cep          String     @db.Char(8)
+  street       String
+  number       String
+  complement   String?
+  district     String
+  city         String
+  state        String     @db.Char(2)
+  downloads    Download[]
+  mfaChallenges MfaChallenge[]
+  passwordResets PasswordReset[]
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+}
+
+model MfaChallenge {
+  id        String    @id @default(cuid())
+  userId    String
+  codeHash  String    @db.Char(64)
+  attempts  Int       @default(0)
+  expiresAt DateTime
+  usedAt    DateTime?
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime  @default(now())
+
+  @@index([userId, expiresAt])
+}
+
+model PasswordReset {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique @db.Char(64)
+  expiresAt DateTime
+  usedAt    DateTime?
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime  @default(now())
+
+  @@index([userId, expiresAt])
+}
+
+model Rom {
+  id          String     @id @default(cuid())
+  title       String
+  slug        String     @unique
+  platform    Platform
+  description String?    @db.Text
+  coverUrl    String?
+  fileName    String
+  filePath    String
+  fileSize    BigInt
+  releaseYear Int?
+  featured    Boolean    @default(false)
+  downloads   Download[]
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@index([platform, createdAt])
+}
+
+model Download {
+  id        String   @id @default(cuid())
+  userId    String
+  romId     String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rom       Rom      @relation(fields: [romId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([romId, createdAt])
+}
