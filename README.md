@@ -6,6 +6,26 @@ JWT, Prisma e MySQL/MariaDB.
 
 ## Configuração
 
+### Deploy completo com Docker
+
+Copie `.env.example` para `.env`, troque todas as senhas e execute:
+
+```bash
+docker compose up -d --build
+```
+
+A aplicação (front-end e API) ficará disponível em `http://localhost:3000`.
+O schema Prisma é sincronizado automaticamente na inicialização. Os dados do
+MariaDB e os arquivos enviados ficam nos volumes `arcadia_mariadb_data` e
+`arcadia_rooms_data`, respectivamente.
+
+Para acompanhar a inicialização ou atualizar uma instalação:
+
+```bash
+docker compose logs -f app
+docker compose up -d --build
+```
+
 ### Banco local com Docker
 
 O ambiente local inclui um MariaDB com volume persistente:
