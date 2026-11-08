@@ -1,0 +1,10 @@
+{
+  "name": "htmlparser2-local-research",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "htmlparser2": "12.0.0",
+    "parse5": "8.0.1",
+    "sanitize-html": "^2.18.0"
+  }
+}

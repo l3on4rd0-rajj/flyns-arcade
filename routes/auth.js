@@ -1,4 +1,5 @@
 import express from 'express'
+import rateLimit from 'express-rate-limit'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import crypto from 'node:crypto'
@@ -6,19 +7,26 @@ import { z } from 'zod'
 import prisma from '../utils/prisma.js'
 import { authenticate } from '../middlewares/roles.js'
 import { sendSecurityEmail } from '../utils/mailer.js'
+import { passwordInput, strongPassword } from '../utils/password-policy.js'
+import { jwtSecret as secret } from '../utils/jwt-secret.js'
 
 const router = express.Router()
-const secret = process.env.JWT_SECRET || 'arcadia-dev-secret'
 const securitySecret = process.env.MFA_CHALLENGE_SECRET || `${secret}:security`
 const mfaTtlMinutes = Math.max(2, Number(process.env.MFA_CODE_TTL_MINUTES || 10))
 const lockDurationMs = 5 * 60 * 1000
 const maxAttempts = 3
 const mfaEnabled = process.env.MFA_ENABLED !== 'false'
+const authAttemptLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Muitas tentativas de autenticacao. Tente novamente mais tarde.' }
+})
 
 const hashValue = value =>
   crypto.createHmac('sha256', securitySecret).update(String(value)).digest('hex')
 const createMfaCode = () => String(crypto.randomInt(100000, 1000000))
-const strongPassword = z.string().min(8).regex(/[A-Z]/).regex(/[a-z]/).regex(/\d/)
 const maskEmail = email => {
   const [name, domain] = email.split('@')
   return `${name.slice(0, 2)}${'*'.repeat(Math.max(2, name.length - 2))}@${domain}`
@@ -48,12 +56,13 @@ const registerSchema = z.object({
   city: z.string().trim().min(2),
   state: z.string().trim().length(2).transform(value => value.toUpperCase())
 })
-const loginSchema = z.object({ email: z.email(), password: z.string().min(1) })
+const loginSchema = z.object({ email: z.email(), password: passwordInput })
 const publicUser = user => ({
   id: user.id,
   fullName: user.fullName,
   email: user.email,
   role: user.role,
+  status: user.status,
   cep: user.cep,
   street: user.street,
   number: user.number,
@@ -67,7 +76,7 @@ const publicUser = user => ({
 const issueToken = user =>
   jwt.sign({ id: user.id, email: user.email, role: user.role }, secret, { expiresIn: '8h' })
 
-router.post('/register', async (req, res) => {
+router.post('/register', authAttemptLimit, async (req, res) => {
   const parsed = registerSchema.safeParse(req.body)
   if (!parsed.success) {
     return res.status(400).json({ message: 'Revise os campos do cadastro.', issues: parsed.error.issues })
@@ -84,13 +93,18 @@ router.post('/register', async (req, res) => {
   return res.status(201).json({ token: issueToken(user), user: publicUser(user) })
 })
 
-router.post('/login', async (req, res) => {
+router.post('/login', authAttemptLimit, async (req, res) => {
   const parsed = loginSchema.safeParse(req.body)
   if (!parsed.success) return res.status(401).json({ message: 'E-mail ou senha incorretos.' })
 
   const email = parsed.data.email.trim().toLowerCase()
   const user = await prisma.user.findUnique({ where: { email } })
   if (!user) return res.status(401).json({ message: 'E-mail ou senha incorretos.' })
+  if (user.status !== 'ACTIVE') {
+    return res.status(403).json({
+      message: user.status === 'REVOKED' ? 'O acesso desta conta foi revogado.' : 'Esta conta está inativa.'
+    })
+  }
 
   const now = new Date()
   if (user.lockedUntil && user.lockedUntil > now) {
@@ -138,6 +152,9 @@ router.post('/login', async (req, res) => {
     data: { failedLoginAttempts: 0, lockedUntil: null }
   })
   if (!mfaEnabled) {
+    await prisma.accessEvent.create({
+      data: { userId: user.id, type: 'LOGIN', ip: req.ip, userAgent: req.get('user-agent')?.slice(0, 500) }
+    })
     return res.json({ token: issueToken(user), user: publicUser(user) })
   }
 
@@ -172,7 +189,7 @@ router.post('/login', async (req, res) => {
   })
 })
 
-router.post('/login/mfa/verify', async (req, res) => {
+router.post('/login/mfa/verify', authAttemptLimit, async (req, res) => {
   const parsed = z.object({
     challengeId: z.string().min(10),
     code: z.string().regex(/^\d{6}$/)
@@ -186,15 +203,23 @@ router.post('/login/mfa/verify', async (req, res) => {
   if (!challenge || challenge.usedAt || challenge.expiresAt <= new Date()) {
     return res.status(400).json({ message: 'Código expirado. Faça login novamente.' })
   }
+  if (challenge.user.status !== 'ACTIVE') {
+    return res.status(403).json({ message: 'Esta conta não está ativa.' })
+  }
   if (challenge.attempts >= maxAttempts) {
     return res.status(423).json({ message: 'Desafio bloqueado após 3 códigos inválidos. Faça login novamente.' })
   }
   if (hashValue(parsed.data.code) !== challenge.codeHash) {
     const attempts = challenge.attempts + 1
-    await prisma.mfaChallenge.update({
-      where: { id: challenge.id },
+    const updated = await prisma.mfaChallenge.updateMany({
+      where: { id: challenge.id, usedAt: null, attempts: challenge.attempts, expiresAt: { gt: new Date() } },
       data: { attempts, usedAt: attempts >= maxAttempts ? new Date() : null }
     })
+    if (updated.count !== 1) {
+      return res.status(401).json({
+        message: 'A verificacao MFA foi atualizada por outra tentativa. Tente novamente.'
+      })
+    }
     return res.status(attempts >= maxAttempts ? 423 : 401).json({
       message: attempts >= maxAttempts
         ? 'Desafio bloqueado após 3 códigos inválidos. Faça login novamente.'
@@ -203,14 +228,36 @@ router.post('/login/mfa/verify', async (req, res) => {
     })
   }
 
-  await prisma.mfaChallenge.update({
-    where: { id: challenge.id },
-    data: { usedAt: new Date() }
-  })
+  try {
+    await prisma.$transaction(async transaction => {
+    const claimed = await transaction.mfaChallenge.updateMany({
+      where: {
+        id: challenge.id,
+        usedAt: null,
+        expiresAt: { gt: new Date() },
+        attempts: { lt: maxAttempts }
+      },
+      data: { usedAt: new Date() }
+    })
+    if (claimed.count !== 1) {
+      const error = new Error('MFA challenge was already claimed')
+      error.code = 'MFA_CHALLENGE_CLAIMED'
+      throw error
+    }
+    await transaction.accessEvent.create({
+      data: { userId: challenge.user.id, type: 'LOGIN', ip: req.ip, userAgent: req.get('user-agent')?.slice(0, 500) }
+    })
+    })
+  } catch (error) {
+    if (error.code === 'MFA_CHALLENGE_CLAIMED') {
+      return res.status(400).json({ message: 'Codigo MFA expirado ou ja utilizado. Faca login novamente.' })
+    }
+    throw error
+  }
   return res.json({ token: issueToken(challenge.user), user: publicUser(challenge.user) })
 })
 
-router.post('/forgot-password', async (req, res) => {
+router.post('/forgot-password', authAttemptLimit, async (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase()
   const genericResponse = {
     message: 'Se o e-mail estiver cadastrado, enviaremos as instruções de redefinição.'
@@ -242,7 +289,7 @@ router.post('/forgot-password', async (req, res) => {
   return res.json(genericResponse)
 })
 
-router.post('/reset-password', async (req, res) => {
+router.post('/reset-password', authAttemptLimit, async (req, res) => {
   const parsed = z.object({
     token: z.string().min(40),
     password: strongPassword
@@ -257,24 +304,33 @@ router.post('/reset-password', async (req, res) => {
     return res.status(400).json({ message: 'Link inválido ou expirado.' })
   }
 
-  await prisma.$transaction([
-    prisma.user.update({
-      where: { id: reset.userId },
-      data: {
-        passwordHash: await bcrypt.hash(parsed.data.password, 12),
-        failedLoginAttempts: 0,
-        lockedUntil: null
+  const passwordHash = await bcrypt.hash(parsed.data.password, 12)
+  try {
+    await prisma.$transaction(async transaction => {
+      const claimed = await transaction.passwordReset.updateMany({
+        where: { id: reset.id, usedAt: null, expiresAt: { gt: new Date() } },
+        data: { usedAt: new Date() }
+      })
+      if (claimed.count !== 1) {
+        const error = new Error('Password reset was already claimed')
+        error.code = 'PASSWORD_RESET_CLAIMED'
+        throw error
       }
-    }),
-    prisma.passwordReset.update({
-      where: { id: reset.id },
-      data: { usedAt: new Date() }
-    }),
-    prisma.mfaChallenge.updateMany({
-      where: { userId: reset.userId, usedAt: null },
-      data: { usedAt: new Date() }
+      await transaction.user.update({
+        where: { id: reset.userId },
+        data: { passwordHash, failedLoginAttempts: 0, lockedUntil: null }
+      })
+      await transaction.mfaChallenge.updateMany({
+        where: { userId: reset.userId, usedAt: null },
+        data: { usedAt: new Date() }
+      })
     })
-  ])
+  } catch (error) {
+    if (error.code === 'PASSWORD_RESET_CLAIMED') {
+      return res.status(400).json({ message: 'Link invalido ou ja utilizado.' })
+    }
+    throw error
+  }
   return res.json({ message: 'Senha redefinida com sucesso. Faça login novamente.' })
 })
 

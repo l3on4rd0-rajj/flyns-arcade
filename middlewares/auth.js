@@ -1,10 +1,7 @@
 // middlewares/auth.js
 import jwt from 'jsonwebtoken'
 import logger from '../utils/logger.js'
-
-const JWT_SECRET =
-  process.env.JWT_SECRET ||
-  (process.env.NODE_ENV === 'production' ? undefined : 'dev-only-jwt-secret')
+import { jwtSecret as JWT_SECRET } from '../utils/jwt-secret.js'
 
 export const isAdminUser = (user = {}) => {
   const adminEmails = (process.env.ADMIN_EMAILS || '')
@@ -51,7 +48,7 @@ const auth = (req, res, next) => {
       return res.status(500).json({ message: 'Configuracao de autenticacao invalida' })
     }
 
-    const decoded = jwt.verify(token, JWT_SECRET)
+    const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] })
     req.user = decoded // você pode usar req.user nos controllers
     logger.auth('token_verification', decoded.email, 'success', {
       path: req.path,

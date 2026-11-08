@@ -12,6 +12,18 @@ enum Role {
   ADMIN
 }
 
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  REVOKED
+}
+
+enum AccessEventType {
+  LOGIN
+  PROFILE_UPDATE
+  PASSWORD_CHANGE
+}
+
 enum Platform {
   GBA
   SWITCH
@@ -25,6 +37,7 @@ model User {
   cpf          String     @unique @db.Char(11)
   passwordHash String
   role         Role       @default(USER)
+  status       UserStatus @default(ACTIVE)
   failedLoginAttempts Int @default(0)
   lockedUntil  DateTime?
   cep          String     @db.Char(8)
@@ -37,8 +50,22 @@ model User {
   downloads    Download[]
   mfaChallenges MfaChallenge[]
   passwordResets PasswordReset[]
+  accessEvents AccessEvent[]
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
+}
+
+model AccessEvent {
+  id        String          @id @default(cuid())
+  userId    String
+  type      AccessEventType
+  ip        String?
+  userAgent String?         @db.VarChar(500)
+  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime        @default(now())
+
+  @@index([userId, createdAt])
+  @@index([type, createdAt])
 }
 
 model MfaChallenge {
@@ -71,6 +98,7 @@ model Rom {
   title       String
   slug        String     @unique
   platform    Platform
+  genre      String     @default("Não categorizado")
   description String?    @db.Text
   coverUrl    String?
   fileName    String
@@ -83,6 +111,7 @@ model Rom {
   updatedAt   DateTime   @updatedAt
 
   @@index([platform, createdAt])
+  @@index([genre])
 }
 
 model Download {

@@ -6,6 +6,7 @@ import crypto from 'node:crypto'
 import { z } from 'zod'
 import prisma from '../utils/prisma.js'
 import { authenticate, adminOnly } from '../middlewares/roles.js'
+import { toPublicRom } from '../utils/rom-public.js'
 
 const router = express.Router()
 const roomsRoot = path.resolve('rooms')
@@ -41,7 +42,16 @@ const romExtensions = /\.(zip|7z|gba|xci|nsp|3ds|cia)$/i
 const coverExtensions = /\.(jpe?g|png|webp)$/i
 const upload = multer({
   storage,
-  limits: { fileSize: 8 * 1024 * 1024 * 1024, files: 2 },
+  limits: {
+    fileSize: 8 * 1024 * 1024 * 1024,
+    files: 2,
+    // Keep multipart metadata bounded; fileSize/files alone do not cap fields.
+    fields: 64,
+    parts: 66,
+    fieldNameSize: 128,
+    fieldSize: 8 * 1024,
+    headerPairs: 200
+  },
   fileFilter: (_req, file, cb) => {
     const allowed = file.fieldname === 'cover'
       ? coverExtensions.test(file.originalname) && /^image\/(jpeg|png|webp)$/.test(file.mimetype)
@@ -53,6 +63,7 @@ const upload = multer({
 const metadataSchema = z.object({
   title: z.string().trim().min(2).max(120),
   platform: z.enum(['GBA', 'SWITCH', 'N3DS']),
+  genre: z.string().trim().min(2).max(60),
   description: z.string().trim().max(1000).optional(),
   releaseYear: z.coerce.number().int().min(1989).max(2100).optional()
 })
@@ -65,16 +76,29 @@ const removeUploadedFiles = (files = {}) => {
 
 router.get('/', async (req, res) => {
   const platform = req.query.platform
-  const where = ['GBA', 'SWITCH', 'N3DS'].includes(platform) ? { platform } : {}
+  const query = String(req.query.q || '').trim()
+  const genre = String(req.query.genre || '').trim()
+  const where = {
+    ...(platform && ['GBA', 'SWITCH', 'N3DS'].includes(platform) ? { platform } : {}),
+    ...(query ? { title: { contains: query } } : {}),
+    ...(genre ? { genre: { contains: genre } } : {})
+  }
   const items = await prisma.rom.findMany({
     where,
     orderBy: [{ featured: 'desc' }, { createdAt: 'desc' }]
   })
-  res.json(items.map(item => ({
-    ...item,
-    fileSize: Number(item.fileSize),
-    available: Boolean(item.filePath && fs.existsSync(path.resolve(item.filePath)))
-  })))
+  res.json(items.map(item => toPublicRom(item)))
+})
+
+router.get('/genres', async (_req, res) => {
+  const genres = await prisma.rom.findMany({ distinct: ['genre'], select: { genre: true }, orderBy: { genre: 'asc' } })
+  res.json(genres.map(item => item.genre).filter(Boolean))
+})
+
+router.get('/:id', authenticate, adminOnly, async (req, res) => {
+  const rom = await prisma.rom.findUnique({ where: { id: req.params.id } })
+  if (!rom) return res.status(404).json({ message: 'ROM não encontrada.' })
+  res.json({ ...rom, fileSize: Number(rom.fileSize) })
 })
 
 router.post(
@@ -112,6 +136,52 @@ router.post(
         }
       })
       return res.status(201).json({ ...rom, fileSize: Number(rom.fileSize) })
+    } catch (error) {
+      removeUploadedFiles(req.files)
+      throw error
+    }
+  }
+)
+
+router.patch(
+  '/:id',
+  authenticate,
+  adminOnly,
+  upload.fields([{ name: 'file', maxCount: 1 }, { name: 'cover', maxCount: 1 }]),
+  async (req, res) => {
+    const current = await prisma.rom.findUnique({ where: { id: req.params.id } })
+    if (!current) {
+      removeUploadedFiles(req.files)
+      return res.status(404).json({ message: 'ROM não encontrada.' })
+    }
+
+    const parsed = metadataSchema.safeParse(req.body)
+    if (!parsed.success) {
+      removeUploadedFiles(req.files)
+      return res.status(400).json({ message: 'Revise os dados da ROM.', issues: parsed.error.issues })
+    }
+
+    const romFile = req.files?.file?.[0]
+    const coverFile = req.files?.cover?.[0]
+    try {
+      const rom = await prisma.rom.update({
+        where: { id: current.id },
+        data: {
+          ...parsed.data,
+          ...(romFile ? {
+            fileName: romFile.originalname,
+            filePath: romFile.path,
+            fileSize: romFile.size
+          } : {}),
+          ...(coverFile ? { coverUrl: `/rooms/covers/${coverFile.filename}` } : {})
+        }
+      })
+
+      if (romFile && current.filePath !== romFile.path) fs.unlink(current.filePath, () => {})
+      if (coverFile && current.coverUrl?.startsWith('/rooms/covers/')) {
+        fs.unlink(path.join(coverDir, path.basename(current.coverUrl)), () => {})
+      }
+      return res.json({ ...rom, fileSize: Number(rom.fileSize) })
     } catch (error) {
       removeUploadedFiles(req.files)
       throw error

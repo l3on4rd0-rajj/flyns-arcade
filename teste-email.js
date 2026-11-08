@@ -17,7 +17,7 @@ async function main() {
   try {
     const info = await transporter.sendMail({
       from: process.env.SMTP_FROM,
-      to: process.env.SMTP_USER, // manda pra você mesmo
+      to: process.env.SMTP_USER, // manda pra MIM MESMO
       subject: 'Teste SMTP RAJJ',
       text: 'Funcionou!',
     })

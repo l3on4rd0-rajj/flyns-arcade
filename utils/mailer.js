@@ -13,6 +13,7 @@ const transporter = nodemailer.createTransport({
   }
 })
 
+
 export async function sendSecurityEmail({ to, subject, html, text }) {
   if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
     throw new Error('SMTP_USER e SMTP_PASS precisam estar configurados.')

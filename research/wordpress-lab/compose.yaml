@@ -1,0 +1,44 @@
+services:
+  wordpress:
+    image: wordpress:7.1.3-php8.3-apache
+    restart: "no"
+    ports:
+      - "127.0.0.1:8081:80"
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_USER: wp_lab
+      WORDPRESS_DB_PASSWORD: wp_lab_password
+      WORDPRESS_DB_NAME: wp_lab
+      WORDPRESS_DEBUG: "1"
+      WORDPRESS_CONFIG_EXTRA: |
+        define('WP_ENVIRONMENT_TYPE', 'local');
+        define('DISALLOW_FILE_EDIT', true);
+        define('WP_AUTO_UPDATE_CORE', false);
+    volumes:
+      - wp_lab_data:/var/www/html
+      - ./plugin-fixture:/var/www/html/wp-content/plugins/lab-fixture:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: mariadb:11.8
+    restart: "no"
+    environment:
+      MARIADB_DATABASE: wp_lab
+      MARIADB_USER: wp_lab
+      MARIADB_PASSWORD: wp_lab_password
+      MARIADB_ROOT_PASSWORD: wp_lab_root_password
+    volumes:
+      - wp_lab_db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  wp_lab_data:
+    name: alexandria_wp_lab_data
+  wp_lab_db:
+    name: alexandria_wp_lab_db
